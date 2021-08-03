@@ -5,7 +5,10 @@ import json
 import re
 
 from .common import InfoExtractor
-from ..compat import compat_HTTPError
+from ..compat import (
+    compat_HTTPError,
+    compat_str,
+)
 from ..utils import (
     determine_ext,
     ExtractorError,
@@ -23,11 +26,13 @@ class DPlayIE(InfoExtractor):
             (?:www\.)?(?P<host>d
                 (?:
                     play\.(?P<country>dk|fi|jp|se|no)|
-                    iscoveryplus\.(?P<plus_country>dk|es|fi|it|se|no)
+                    iscoveryplus\.(?:
+                       (?P<plus_country>dk|es|fi|it|se|no|nl)|
+                       co\.(?P<co_plus_country>uk))
                 )
             )|
             (?P<subdomain_country>es|it)\.dplay\.com
-        )/[^/]+''' + _PATH_REGEX
+        )(?:/[^/]+)?''' + _PATH_REGEX
 
     _TESTS = [{
         # non geo restricted, via secure api, unsigned download hls URL
@@ -246,30 +251,28 @@ class DPlayIE(InfoExtractor):
         creator = series = None
         tags = []
         thumbnails = []
-        included = video.get('included') or []
-        if isinstance(included, list):
-            for e in included:
-                attributes = e.get('attributes')
-                if not attributes:
-                    continue
-                e_type = e.get('type')
-                if e_type == 'channel':
-                    creator = attributes.get('name')
-                elif e_type == 'image':
-                    src = attributes.get('src')
-                    if src:
-                        thumbnails.append({
-                            'url': src,
-                            'width': int_or_none(attributes.get('width')),
-                            'height': int_or_none(attributes.get('height')),
-                        })
-                if e_type == 'show':
-                    series = attributes.get('name')
-                elif e_type == 'tag':
-                    name = attributes.get('name')
-                    if name:
-                        tags.append(name)
-
+        for e in try_get(video, lambda x: x['included'], list) or []:
+            attributes = try_get(e, lambda x: x['attributes'], dict)
+            if not attributes:
+                continue
+            e_type = e.get('type')
+            if e_type == 'channel':
+                creator = attributes.get('name')
+            elif e_type == 'image':
+                src = attributes.get('src')
+                if src:
+                    thumbnails.append({
+                        'url': src,
+                        'width': int_or_none(attributes.get('width')),
+                        'height': int_or_none(attributes.get('height')),
+                    })
+            if e_type == 'show':
+                series = attributes.get('name')
+            elif e_type == 'tag':
+                name = attributes.get('name')
+                if name:
+                    tags.append(name)
+        
         return {
             'id': video_id,
             'display_id': display_id,
@@ -286,14 +289,70 @@ class DPlayIE(InfoExtractor):
             'formats': formats,
         }
 
+    def _pl_extract(self, url, playlist_id, disco_host, realm, country):
+
+        geo_countries = [country.upper()]
+        self._initialize_geo_bypass({
+            'countries': geo_countries,
+        })
+        disco_base = 'https://%s/' % disco_host
+        headers = {
+            'Referer': url,
+        }
+        self._update_disco_api_headers(headers, disco_base, playlist_id, realm)
+
+        def get_collection_id(incl):
+            for ii in incl:
+                if try_get(ii, lambda x: x['type']) != 'collection':
+                    continue
+                if try_get(ii, lambda x: x['meta']['itemsCurrentPage']) == 1:
+                    return ii['id']
+
+        try:
+            routes = self._download_json(
+                disco_base + 'cms/routes/' + playlist_id, playlist_id,
+                headers=headers, query={
+                    'include': 'default',
+                    'page[items.number]': '1'
+                })
+            collection_id = try_get(routes, lambda x: get_collection_id(x['included']), compat_str)
+            collection = self._download_json(
+                disco_base + 'cms/collections/' + collection_id, playlist_id,
+                headers=headers, query={
+                    'include': 'default',
+                    'page[items.number]': '1'
+                })
+        except ExtractorError as e:
+            if isinstance(e.cause, compat_HTTPError) and e.cause.code == 403:
+                self._process_errors(e, geo_countries)
+            raise
+
+        entries = []
+        for video in try_get(collection, lambda x: x['included'], list) or []:
+            if try_get(video, lambda x: x['type']) != 'video':
+                continue
+            display_id = try_get(video, lambda x: x['attributes']['path'], compat_str)
+            if not display_id:
+                continue
+            entry = self._get_disco_api_info(
+                url, display_id, disco_host, realm, country)
+            if entry:
+                entries.append(entry)
+
+        return self.playlist_result(entries, playlist_id)
+        
     def _real_extract(self, url):
         mobj = re.match(self._VALID_URL, url)
         display_id = mobj.group('id')
         domain = mobj.group('domain').lstrip('www.')
-        country = mobj.group('country') or mobj.group('subdomain_country') or mobj.group('plus_country')
+        country = (mobj.group('country') or mobj.group('subdomain_country') or mobj.group('plus_country')
+                   or mobj.group('co_country') or mobj.group('co_plus_country'))
         host = 'disco-api.' + domain if domain[0] == 'd' else 'eu2-prod.disco-api.com'
+        (realm, country) = ('dplay' + country.lower(), country.upper()) if country.lower() != 'uk' else ('questuk', 'GB')
+        if re.match(r'(show|programmer|series|ohjelmat|programmi|program|programmas)/', display_id):
+            return self._pl_extract(url, display_id, host, realm, country)
         return self._get_disco_api_info(
-            url, display_id, host, 'dplay' + country, country)
+            url, display_id, host, realm, country)
 
 
 class DiscoveryPlusIE(DPlayIE):
