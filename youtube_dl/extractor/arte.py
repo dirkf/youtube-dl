@@ -19,14 +19,18 @@ from ..utils import (
 )
 
 
+# yt-dlp shim
+if not hasattr(InfoExtractor, '_extract_m3u8_formats_and_subtitles'):
+    class YTDLPShimIE(InfoExtractor):
+        def _extract_m3u8_formats_and_subtitles(self, *args, **kwargs):
+            return self._extract_m3u8_formats(*args, **kwargs), {}
+    
+    InfoExtractor = YTDLPShimIE
+
+
 class ArteTVBaseIE(InfoExtractor):
     _ARTE_LANGUAGES = 'fr|de|en|es|it|pl|ro'
     _API_BASE = 'https://api.arte.tv/api/player/v2'
-
-    # yt-dlp shims
-
-    # def _extract_m3u8_formats_and_subtitles(self, *args, **kwargs):
-    #     return self._extract_m3u8_formats(*args, **kwargs), {}
 
 
 class ArteTVIE(ArteTVBaseIE):
